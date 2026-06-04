@@ -60,6 +60,49 @@ const INITIAL_PATIENTS = [
   }
 ];
 
+const STORAGE_KEY = 'hom_patients';
+
+const getLocalDateString = () => {
+  const now = new Date();
+  const timezoneOffsetMs = now.getTimezoneOffset() * 60 * 1000;
+  return new Date(now.getTime() - timezoneOffsetMs).toISOString().split('T')[0];
+};
+
+const toArray = (value) => Array.isArray(value) ? value : [];
+
+const normalizePatients = (value) => {
+  if (!Array.isArray(value)) return INITIAL_PATIENTS;
+
+  return value
+    .filter(patient => patient && typeof patient === 'object' && patient.id)
+    .map(patient => ({
+      ...patient,
+      visits: toArray(patient.visits),
+      documents: toArray(patient.documents)
+    }));
+};
+
+const getNextPatientId = (patients) => {
+  const year = new Date().getFullYear();
+  const patientIdPattern = new RegExp(`^HOM-${year}-(\\d+)$`);
+  const highestForYear = toArray(patients).reduce((highest, patient) => {
+    const match = String(patient?.id || '').match(patientIdPattern);
+    if (!match) return highest;
+    return Math.max(highest, Number(match[1]));
+  }, 0);
+
+  const padded = String(highestForYear + 1).padStart(4, '0');
+  return `HOM-${year}-${padded}`;
+};
+
+const createRecordId = (prefix) => {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    return `${prefix}_${crypto.randomUUID()}`;
+  }
+
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+};
+
 export default function App() {
   // Authentication & Security State
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -70,8 +113,13 @@ export default function App() {
   // App Navigation & UI State
   const [currentTab, setCurrentTab] = useState("patients"); // patients, add, info
   const [patients, setPatients] = useState(() => {
-    const saved = localStorage.getItem('hom_patients');
-    return saved ? JSON.parse(saved) : INITIAL_PATIENTS;
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      return saved ? normalizePatients(JSON.parse(saved)) : INITIAL_PATIENTS;
+    } catch (error) {
+      console.warn("Unable to load saved patients. Falling back to starter records.", error);
+      return INITIAL_PATIENTS;
+    }
   });
   
   const [searchQuery, setSearchQuery] = useState("");
@@ -103,8 +151,25 @@ export default function App() {
   const [toast, setToast] = useState(null);
 
   useEffect(() => {
-    localStorage.setItem('hom_patients', JSON.stringify(patients));
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(patients));
+    } catch (error) {
+      console.warn("Unable to save patient records.", error);
+      triggerToast("Unable to save records in this browser session", "error");
+    }
   }, [patients]);
+
+  useEffect(() => {
+    if (!selectedPatient) return;
+
+    const latestPatient = patients.find(patient => patient.id === selectedPatient.id);
+    if (latestPatient) {
+      setSelectedPatient(latestPatient);
+    } else {
+      setSelectedPatient(null);
+      setCurrentTab("patients");
+    }
+  }, [patients, selectedPatient?.id]);
 
   const triggerToast = (message, type = "success") => {
     setToast({ message, type });
@@ -124,36 +189,31 @@ export default function App() {
   };
 
   // Generate Unique ID
-  const generatePatientId = () => {
-    const year = new Date().getFullYear();
-    const count = patients.length + 1;
-    const padded = String(count).padStart(4, '0');
-    return `HOM-${year}-${padded}`;
-  };
+  const generatePatientId = (sourcePatients = patients) => getNextPatientId(sourcePatients);
 
   // Handle Add Patient
   const handleAddPatientSubmit = (e) => {
     e.preventDefault();
-    if (!formData.name || !formData.phone || !formData.age) {
+    if (!formData.name.trim() || !formData.phone.trim() || !formData.age.trim()) {
       triggerToast("Please fill all required fields", "error");
       return;
     }
 
-    const newId = generatePatientId();
+    const newId = generatePatientId(patients);
     const newPatient = {
       id: newId,
-      name: formData.name,
-      age: formData.age,
+      name: formData.name.trim(),
+      age: formData.age.trim(),
       gender: formData.gender,
-      phone: formData.phone,
-      address: formData.address,
-      history: formData.history,
-      createdAt: new Date().toISOString().split('T')[0],
+      phone: formData.phone.trim(),
+      address: formData.address.trim(),
+      history: formData.history.trim(),
+      createdAt: getLocalDateString(),
       visits: [
         {
-          id: `v_${Date.now()}`,
-          date: new Date().toISOString().split('T')[0],
-          notes: formData.history || "Initial registration and patient profile created.",
+          id: createRecordId("v"),
+          date: getLocalDateString(),
+          notes: formData.history.trim() || "Initial registration and patient profile created.",
           type: "First Visit"
         }
       ],
@@ -173,18 +233,18 @@ export default function App() {
   // Handle Add Visit Notes
   const handleAddVisit = (e) => {
     e.preventDefault();
-    if (!newVisitNotes.trim()) return;
+    if (!selectedPatient || !newVisitNotes.trim()) return;
 
     const newVisitObj = {
-      id: `v_${Date.now()}`,
-      date: new Date().toISOString().split('T')[0],
+      id: createRecordId("v"),
+      date: getLocalDateString(),
       notes: newVisitNotes,
       type: newVisitType
     };
 
     const updatedPatients = patients.map(p => {
       if (p.id === selectedPatient.id) {
-        const updatedVisits = [newVisitObj, ...p.visits];
+        const updatedVisits = [newVisitObj, ...toArray(p.visits)];
         return { ...p, visits: updatedVisits };
       }
       return p;
@@ -193,7 +253,7 @@ export default function App() {
     setPatients(updatedPatients);
     setSelectedPatient(prev => ({
       ...prev,
-      visits: [newVisitObj, ...prev.visits]
+      visits: [newVisitObj, ...toArray(prev?.visits)]
     }));
     setNewVisitNotes("");
     triggerToast("Visit record added to timeline!");
@@ -202,7 +262,10 @@ export default function App() {
   // Simulated Document Upload & OCR Extraction
   const handleFileUploadSimulated = (e) => {
     const file = e.target.files[0];
-    if (!file) return;
+    if (!file || !selectedPatient) return;
+
+    const patientId = selectedPatient.id;
+    const patientName = selectedPatient.name;
 
     triggerToast("Uploading file to clinic database...");
 
@@ -210,33 +273,39 @@ export default function App() {
     setTimeout(() => {
       let mockOcrText = "";
       if (file.name.toLowerCase().includes("report") || file.name.toLowerCase().includes("lab")) {
-        mockOcrText = `[OCR Text Extracted] PATIENT: ${selectedPatient.name}. Hemoglobin: 14.2 g/dL (Normal). WBC Count: 6,800/cmm. Platelets: 2,50,000/cmm. Blood Urea: 24mg/dL. High cholesterol indicated.`;
+        mockOcrText = `[OCR Text Extracted] PATIENT: ${patientName}. Hemoglobin: 14.2 g/dL (Normal). WBC Count: 6,800/cmm. Platelets: 2,50,000/cmm. Blood Urea: 24mg/dL. High cholesterol indicated.`;
       } else {
         mockOcrText = `[OCR Scanned Text] Homeopathic Case-Taking Note. Subjective symptoms matching Lycopodium, gastric disturbance, bloating post-3PM. Warm drinks preferred.`;
       }
 
       const newDoc = {
-        id: `doc_${Date.now()}`,
+        id: createRecordId("doc"),
         name: file.name,
         type: uploadType,
-        date: new Date().toISOString().split('T')[0],
+        date: getLocalDateString(),
         size: `${(file.size / (1024 * 1024)).toFixed(1)} MB`,
         previewUrl: file.type.startsWith("image/") ? URL.createObjectURL(file) : null,
         textContent: mockOcrText
       };
 
-      const updatedPatients = patients.map(p => {
-        if (p.id === selectedPatient.id) {
-          return { ...p, documents: [newDoc, ...p.documents] };
+      setPatients(prevPatients => prevPatients.map(p => {
+        if (p.id === patientId) {
+          return { ...p, documents: [newDoc, ...toArray(p.documents)] };
         }
         return p;
+      }));
+
+      setSelectedPatient(prev => {
+        if (!prev || prev.id !== patientId) return prev;
+        return {
+          ...prev,
+          documents: [newDoc, ...toArray(prev.documents)]
+        };
       });
 
-      setPatients(updatedPatients);
-      setSelectedPatient(prev => ({
-        ...prev,
-        documents: [newDoc, ...prev.documents]
-      }));
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
 
       triggerToast("File uploaded & secured successfully!");
       
@@ -258,7 +327,7 @@ export default function App() {
 
   // Simulated Prescription Generator / Downloader
   const handleGeneratePrescription = (patient) => {
-    const remedyNote = patient.visits[0]?.notes || "Remedy prescription details";
+    const remedyNote = toArray(patient.visits)[0]?.notes || "Remedy prescription details";
     const docText = `
 =============================================
          DR. SAMUEL'S HOMEOPATHY CLINIC
@@ -306,9 +375,9 @@ Authorized Digital Signature: Dr. Samuel (BHMS)
   const filteredPatients = patients.filter(patient => {
     const query = searchQuery.toLowerCase();
     return (
-      patient.id.toLowerCase().includes(query) ||
-      patient.name.toLowerCase().includes(query) ||
-      patient.phone.includes(query)
+      String(patient.id || '').toLowerCase().includes(query) ||
+      String(patient.name || '').toLowerCase().includes(query) ||
+      String(patient.phone || '').includes(query)
     );
   });
 
@@ -439,13 +508,13 @@ Authorized Digital Signature: Dr. Samuel (BHMS)
                     <div className="text-center border-x border-slate-800">
                       <p className="text-[10px] text-slate-500 uppercase tracking-wider">Follow-ups</p>
                       <p className="text-lg font-bold text-emerald-400">
-                        {patients.reduce((acc, p) => acc + p.visits.length - 1, 0) + 3}
+                        {patients.reduce((acc, p) => acc + Math.max(toArray(p.visits).length - 1, 0), 0)}
                       </p>
                     </div>
                     <div className="text-center">
                       <p className="text-[10px] text-slate-500 uppercase tracking-wider">Docs Stored</p>
                       <p className="text-lg font-bold text-blue-400">
-                        {patients.reduce((acc, p) => acc + p.documents.length, 0)}
+                        {patients.reduce((acc, p) => acc + toArray(p.documents).length, 0)}
                       </p>
                     </div>
                   </div>
@@ -512,7 +581,7 @@ Authorized Digital Signature: Dr. Samuel (BHMS)
                           
                           <div className="flex items-center gap-1 text-slate-500">
                             <span className="text-xs bg-slate-950 px-2 py-1 rounded text-slate-400 border border-slate-800">
-                              {patient.visits.length} Vis
+                              {toArray(patient.visits).length} Vis
                             </span>
                           </div>
                         </div>
@@ -723,13 +792,13 @@ Authorized Digital Signature: Dr. Samuel (BHMS)
                       accept="image/*,application/pdf"
                     />
 
-                    {selectedPatient.documents.length === 0 ? (
+                    {toArray(selectedPatient.documents).length === 0 ? (
                       <p className="text-xs text-slate-500 py-3 text-center italic">
                         No medical scans, reports or images uploaded yet.
                       </p>
                     ) : (
                       <div className="grid grid-cols-2 gap-2">
-                        {selectedPatient.documents.map((doc) => (
+                        {toArray(selectedPatient.documents).map((doc) => (
                           <div 
                             key={doc.id}
                             className="bg-slate-950 p-2 rounded-lg border border-slate-800 flex flex-col justify-between text-xs space-y-2"
@@ -843,7 +912,7 @@ Authorized Digital Signature: Dr. Samuel (BHMS)
 
                     {/* Timeline Log */}
                     <div className="relative pl-6 border-l-2 border-slate-800 space-y-4 py-2">
-                      {selectedPatient.visits.map((visit, index) => (
+                      {toArray(selectedPatient.visits).map((visit, index) => (
                         <div key={visit.id} className="relative">
                           {/* Timeline Dot Indicator */}
                           <span className={`absolute -left-[31px] top-1.5 w-4 h-4 rounded-full border-4 border-slate-950 ${index === 0 ? 'bg-emerald-400' : 'bg-slate-700'}`}></span>
@@ -894,10 +963,12 @@ Authorized Digital Signature: Dr. Samuel (BHMS)
                 onClick={() => {
                   if (selectedPatient) {
                     setCurrentTab("profile");
-                  } else {
+                  } else if (patients.length > 0) {
                     // Default to first patient if none selected
                     setSelectedPatient(patients[0]);
                     setCurrentTab("profile");
+                  } else {
+                    triggerToast("Add a patient before opening a profile", "error");
                   }
                 }}
                 className={`flex flex-col items-center justify-center gap-1 ${currentTab === "profile" ? "text-emerald-400" : "text-slate-500"}`}

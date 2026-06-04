@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Homeocare</string>
+    <string name="title_activity_main">Homeocare</string>
+    <string name="package_name">com.homeocare.app</string>
+    <string name="custom_url_scheme">com.homeocare.app</string>
+</resources>
